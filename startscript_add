@@ -1,0 +1,161 @@
+#!/bin/bash
+#
+#set -x
+# Ergaenzung zu /etc/init.d/postfix
+#
+datum_kurz=$(date '+%y-%m-%d')
+NAME=${NAME:-postfix}
+UPostfix=""
+UUPostfix=""
+postfixVers=`dpkg --list 2> /dev/null | grep postfix | awk '{print $3}'`
+if [ "${postfixVers:0:3}" != "2.3" ]
+ then
+  UPostfix="postfix"
+ fi
+if [ -d /var/lib/amavis -a ! -d /var/lib/amavis/tmp ]
+ then
+  mkdir /var/lib/amavis/tmp
+  chown amavis:amavis /var/lib/amavis/tmp
+ fi
+
+case "$1" in
+    start)
+      if [      -d /var/spool/postfix/var/run/saslauthd \
+           -a ! -d /var/run/saslauthd ]
+       then
+        ln -s /var/spool/postfix/var/run/saslauthd /var/run/
+       fi
+      ;;
+    start-sink)
+      if [ `cat /etc/init.d/postfix | grep "/postfix/startscript_add start-sink" | wc -l` -eq 0 -o \
+           `cat /etc/init.d/postfix | grep "/postfix/startscript_add stop-sink"  | wc -l` -eq 0 ]
+       then
+        echo "start-sink fehlt in der /etc/init.d/postfix!!"
+	if [ -w /etc/init.d/postfix ]
+	 then
+          echo "fuege start-sink an!"
+          echo "#            /home/ogm315/projekte/postfix/startscript_add start-sink" >> /etc/init.d/postfix
+          echo "#            /home/ogm315/projekte/postfix/startscript_add stop-sink"  >> /etc/init.d/postfix
+	 fi
+       fi
+      sinkbin=`which smtp-sink 2>/dev/null`
+      sinkpid=`ps fax 2>/dev/null | grep -v "\bgrep\b" | grep smtp-sink | wc -l 2>/dev/null`
+      if [ -r /etc/default/smtp-sink ]
+       then
+        hosts=`cat /etc/default/smtp-sink | sed -e 's/#.*$//' | sed -e 's/\"//g' | grep -i "Listen=" | awk -F= '{print $2}'`
+        Dummyhost=`cat /etc/default/smtp-sink | sed -e 's/#.*$//' | sed -e 's/\"//g' | grep -i "Dummyhost=" | awk -F= '{print $2}'`
+       else
+        echo "#wo soll smtp-sink zusaetzlich zu localhost lauschen" > /etc/default/smtp-sink
+        echo "# Sinvollerweise hoechstens noch an \$HOSTNAME" >> /etc/default/smtp-sink
+        echo "Listen=\"\"" >> /etc/default/smtp-sink
+        echo "Dummyhost=\"-hMuelleimer\"" >> /etc/default/smtp-sink
+       fi
+      if [ "x${Dummyhost}" == "x" ]
+       then
+        Dummyhost="-hMuelleimer"
+       fi
+      hosts="${hosts} localhost"
+      for h in ${hosts}
+       do
+        if [ `echo "${h}" | grep '\b${HOSTNAME}\b' | wc -l` -eq 1 ]
+         then
+          h=${HOSTNAME}
+         fi
+        hh=`host ${h} 2>/dev/null | perl -p -e 's/^.*?\s([\d]+\.[\d]+\.[\d]+\.[\d]+).*?$/$1/'`
+        if [ `echo "${h}" | grep 'localhost' | wc -l` -eq 1 ]
+         then
+          hh="127.0.0.1"
+         fi
+        if [ `echo ${hosts_} | grep ${hh} | wc -l` -eq 0 ]
+         then
+          hosts_="${hosts_} ${hh}"
+         fi
+       done
+      hosts=${hosts_}
+      if [ ${sinkpid} -eq 0 -a -n "${sinkbin}" ]
+       then
+        echo "----------------------" >> /var/log/allg/smtp-sink.log
+	if [ "X" != "X${UPostfix}" ]
+	 then
+  	  chown ${UPostfix} /var/log/allg/smtp-sink.log*
+	  UUPostfix="-u ${UPostfix}"
+	 fi
+        echo "--- Starte smtp-sink: ${datum_kurz}" >> /var/log/allg/smtp-sink.log
+        for h in ${hosts}
+         do
+          ${sinkbin} -v ${UUPostfix} -c ${Dummyhost} ${h}:12525 200 >> /var/log/allg/smtp-sink.log 2>&1 &
+          echo "${sinkbin} -v ${UUPostfix} -c ${Dummyhost} ${h}:12525 200 \>\> /var/log/allg/smtp-sink.log 2\>&1 \&"
+         done
+       fi
+        ;;
+    stop-sink)
+      sinkbin=`which smtp-sink 2>/dev/null`
+      sinkpids=`ps fax 2>/dev/null | grep -v "\bgrep\b" | grep smtp-sink | awk '{print $1}' 2>/dev/null`
+      for sinkpid in ${sinkpids}
+       do
+        echo "----------------------" >> /var/log/allg/smtp-sink.log
+        echo "--- Stope smtp-sink: ${datum_kurz}" >> /var/log/allg/smtp-sink.log
+        if [ -n "${sinkpid}" -a -n "${sinkbin}" ]
+         then
+          kill ${sinkpid}
+         fi
+       done
+        ;;
+    reload)
+## von uwe.perl@gmx.de geaenderter Bereich
+### BEGIN ###
+        if [ `lsof -i :12525 2>/dev/null | grep "smtp-sink" | wc -l` -eq 0 ]
+         then
+          $0 start-sink
+         fi
+        cd /etc/postfix
+#die PCRE- und RegExp-Tabellen erfordern (angeblich s.Heinlein Postfix S.95) auch ein reload
+        for i in *.[Rr][Ee][Gg][Ee][Xx][Pp] *.[Pp][Cc][Rr][Ee]
+         do
+          if [ -r "${i}" -a "${i}" -nt main.cf ]
+           then
+            touch main.cf
+           fi
+         done
+        i="/etc/aliases"
+        if [ -r $i -a "$i" -nt "${i}.db" ]; then
+          echo "Lade $i neu."
+          newaliases ## "${i}"
+         fi
+        for i in *.db
+         do
+          i=${i%%\.db}
+          if [ -r "$i" -a "$i" -nt "${i}.db" ]; then
+            echo "Lade $i neu."
+            postmap "${i}"
+           fi
+         done
+        echo -n "Reload mail service (Postfix)"
+        if [ ! -r main.cf.kurz -o main.cf -nt main.cf.kurz -o master.cf -nt main.cf.kurz ]; then
+          if [ -r sender_checks.regexp ] ; then
+            cat sender_checks.regexp | sort -u | sort -f -b -d -t@ -k2 > sender_checks.regexps
+            mv -f sender_checks.regexps sender_checks.regexp
+           fi
+#Fehler: die PCRE- und RegExp-Tabellen erfordern auch ein reload
+##          cat main.cf | grep -v "^#" | grep -v "^$" | perl -p -e '$/ = 0777; s/\n\s/ /g;' | sort > main.cf.kurz
+# Besser so: dann sind es alle veraenderten Parameter
+##          postconf -n > main.cf.kurz
+# Noch besser so: dann sind es alle Parameter, auch die nichtveraenderten default-Werte
+          postconf > main.cf.kurz
+
+          /usr/sbin/postfix reload > /dev/null 2>&1 || return=$rc_failed
+          /usr/sbin/postfix flush
+          echo -e "$return"
+         else
+          echo "  nicht noetig!"
+         fi
+        postsuper -r ALL
+        cd -
+### END ###
+        ;;
+    *)
+        ;;
+esac
+exit 0
+set -
+
